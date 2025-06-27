@@ -6,9 +6,9 @@ from threading import Thread
 import schedule
 from datetime import datetime
 
-app = Flask(__name__)
+app = Flask(__name__ )
 
-# Variável para armazenar status
+# Status da aplicação
 app_status = {
     "iniciado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "ultima_notificacao": "Nenhuma ainda",
@@ -18,20 +18,15 @@ app_status = {
 
 @app.route('/')
 def home():
-    return """
-    <h1>🤖 Automação de Notificações</h1>
-    <p><strong>Status:</strong> ✅ Ativo e funcionando!</p>
-    <p><strong>Iniciado em:</strong> {}</p>
-    <p><strong>Total de notificações enviadas:</strong> {}</p>
-    <p><strong>Última notificação:</strong> {}</p>
+    return f"""
+    <h1>🤖 Automação de Notificações - Discord</h1>
+    <p><strong>Status:</strong> ✅ Ativo</p>
+    <p><strong>Iniciado em:</strong> {app_status['iniciado_em']}</p>
+    <p><strong>Total enviadas:</strong> {app_status['total_notificacoes']}</p>
+    <p><strong>Última:</strong> {app_status['ultima_notificacao']}</p>
     <br>
-    <a href="/status">Ver Status JSON</a> | 
-    <a href="/test">Testar Notificação</a>
-    """.format(
-        app_status["iniciado_em"],
-        app_status["total_notificacoes"], 
-        app_status["ultima_notificacao"]
-    )
+    <a href="/status">Status JSON</a> | <a href="/test">Testar Notificação</a>
+    """
 
 @app.route('/status')
 def status():
@@ -39,122 +34,106 @@ def status():
 
 @app.route('/test')
 def test_notification():
-    """Endpoint para testar notificação manualmente"""
     try:
         enviar_notificacao_teste()
-        return jsonify({"message": "Notificação de teste enviada!", "status": "success"})
+        return jsonify({"message": "Notificação teste enviada para Discord!", "status": "success"})
     except Exception as e:
         return jsonify({"message": f"Erro: {str(e)}", "status": "error"})
 
+def enviar_discord(mensagem):
+    """Envia mensagem para o Discord"""
+    try:
+        webhook_url = os.environ.get('DISCORD_WEBHOOK')
+        
+        if not webhook_url:
+            print("❌ Webhook do Discord não configurado")
+            return False
+            
+        data = {
+            "content": mensagem,
+            "username": "Automação Bot"
+        }
+        
+        response = requests.post(webhook_url, json=data, timeout=10)
+        
+        if response.status_code in [200, 204]:
+            print(f"✅ Discord enviado: {mensagem}")
+            return True
+        else:
+            print(f"❌ Erro Discord: {response.status_code}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Erro ao enviar Discord: {e}")
+        return False
+
 def enviar_notificacao():
-    """Função principal de notificação - PERSONALIZE AQUI"""
+    """Notificação automática principal"""
     try:
         agora = datetime.now().strftime("%H:%M:%S - %d/%m/%Y")
+        mensagem = f"🔔 **Notificação Automática**\n\n📅 {agora}\n✅ Sistema funcionando perfeitamente!"
         
-        # EXEMPLO: Notificação simples no console
-        mensagem = f"🔔 Notificação automática enviada às {agora}"
-        print(mensagem)
-        
-        # AQUI VOCÊ PODE ADICIONAR:
-        # - Telegram Bot
-        # - Discord Webhook
-        # - Email
-        # - WhatsApp Business API
-        # - Qualquer outra integração
-        
-        # Exemplo de integração com Telegram (descomente e configure):
-        # telegram_bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        # telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-        # if telegram_bot_token and telegram_chat_id:
-        #     telegram_url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
-        #     telegram_data = {"chat_id": telegram_chat_id, "text": mensagem}
-        #     requests.post(telegram_url, data=telegram_data, timeout=10)
+        # Enviar para Discord
+        sucesso = enviar_discord(mensagem)
         
         # Atualizar status
         app_status["ultima_notificacao"] = agora
-        app_status["total_notificacoes"] += 1
-        
-        return True
+        if sucesso:
+            app_status["total_notificacoes"] += 1
+            
+        print(f"📱 Notificação processada às {agora}")
+        return sucesso
         
     except Exception as e:
-        print(f"❌ Erro ao enviar notificação: {e}")
+        print(f"❌ Erro na notificação: {e}")
         return False
 
 def enviar_notificacao_teste():
-    """Notificação de teste"""
+    """Notificação de teste manual"""
     agora = datetime.now().strftime("%H:%M:%S - %d/%m/%Y")
-    print(f"🧪 TESTE: Notificação manual às {agora}")
+    mensagem = f"🧪 **TESTE - Notificação Manual**\n\n📅 {agora}\n🚀 Enviado via dashboard!"
+    
+    sucesso = enviar_discord(mensagem)
     app_status["ultima_notificacao"] = f"TESTE - {agora}"
-    app_status["total_notificacoes"] += 1
+    if sucesso:
+        app_status["total_notificacoes"] += 1
 
 def agendar_tarefas():
-    """Configurar agendamentos - PERSONALIZE AQUI"""
-    
-    # Exemplos de agendamentos (descomente o que quiser usar):
-    
-    # A cada 30 minutos
+    """Configurar agendamentos"""
+    # Notificação a cada 30 minutos
     schedule.every(30).minutes.do(enviar_notificacao)
-    
-    # A cada hora
-    # schedule.every().hour.do(enviar_notificacao)
-    
-    # Diariamente às 9h
-    # schedule.every().day.at("09:00").do(enviar_notificacao)
-    
-    # Segunda, quarta e sexta às 14h
-    # schedule.every().monday.at("14:00").do(enviar_notificacao)
-    # schedule.every().wednesday.at("14:00").do(enviar_notificacao)
-    # schedule.every().friday.at("14:00").do(enviar_notificacao)
     
     print("📅 Agendamentos configurados!")
     print("⏰ Próxima execução:", schedule.next_run())
     
-    # Loop principal do agendador
     while True:
         schedule.run_pending()
-        time.sleep(60)  # Verifica a cada minuto
+        time.sleep(60)
 
 def keep_alive():
-    """Mantém o app ativo (anti-hibernação)"""
-    # Pega a URL do app no Render
-    app_url = os.environ.get('RENDER_EXTERNAL_URL')
-    if not app_url:
-        app_url = "http://localhost:5000"  # Para testes locais
+    """Mantém app ativo"""
+    app_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5000' )
     
     while True:
         try:
             response = requests.get(f"{app_url}/status", timeout=10)
             if response.status_code == 200:
-                print("✅ Keep-alive: App está ativo")
-            else:
-                print(f"⚠️ Keep-alive: Status {response.status_code}")
-        except Exception as e:
-            print(f"❌ Keep-alive erro: {e}")
-        
-        time.sleep(300)  # Ping a cada 5 minutos
+                print("✅ Keep-alive ativo")
+        except:
+            print("❌ Keep-alive erro")
+        time.sleep(300)
 
 if __name__ == '__main__':
-    print("🚀 Iniciando Automação de Notificações...")
-    print("📊 Dashboard disponível em: http://localhost:5000")
+    print("🚀 Iniciando Automação com Discord...")
     
-    # Iniciar agendador em thread separada
-    print("📅 Iniciando agendador...")
-    scheduler_thread = Thread(target=agendar_tarefas)
-    scheduler_thread.daemon = True
-    scheduler_thread.start()
+    # Testar Discord na inicialização
+    enviar_discord("🚀 **Automação Iniciada!**\n\n✅ Sistema online e funcionando 24/7")
     
-    # Iniciar keep-alive em thread separada
-    print("💓 Iniciando keep-alive...")
-    keepalive_thread = Thread(target=keep_alive)
-    keepalive_thread.daemon = True
-    keepalive_thread.start()
+    # Threads
+    Thread(target=agendar_tarefas, daemon=True).start()
+    Thread(target=keep_alive, daemon=True).start()
     
-    # Enviar primeira notificação
-    print("📱 Enviando primeira notificação...")
-    enviar_notificacao()
-    
-    # Iniciar servidor Flask
+    # Servidor
     port = int(os.environ.get('PORT', 5000))
-    print(f"🌐 Servidor iniciando na porta {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
 
