@@ -1,31 +1,31 @@
 from flask import Flask
 import os
-from indicadores import analisar_ativos
-from padroes import detectar_oco, detectar_triangulo, detectar_cunha
 import schedule
 import time
 import threading
 import requests
+from indicadores import analisar_ativos
+from padroes import detectar_oco, detectar_triangulo, detectar_cunha
 
 app = Flask(__name__)
 
-# Webhooks e tokens
+# Variáveis de ambiente
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Ativos e timeframes
+# Lista de ativos e timeframes
 ATIVOS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "HYPEUSDT", "WIFUSDT", "AEROUSDT"]
 TIMEFRAMES = ["15m", "1h", "4h"]
 
-# Funções de envio
+# Enviar mensagem para Discord e Telegram
 def enviar_alerta(mensagem):
     # Discord
     if DISCORD_WEBHOOK:
         try:
             requests.post(DISCORD_WEBHOOK, json={"content": mensagem})
         except Exception as e:
-            print("Erro Discord:", e)
+            print("❌ Erro ao enviar para Discord:", e)
     # Telegram
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         try:
@@ -33,11 +33,11 @@ def enviar_alerta(mensagem):
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
             resposta = requests.post(url, data=data)
             if resposta.status_code != 200:
-                print("Erro Telegram:", resposta.status_code, resposta.text)
+                print("❌ Erro Telegram:", resposta.status_code, resposta.text)
         except Exception as e:
-            print("Erro Telegram:", e)
+            print("❌ Erro ao enviar para Telegram:", e)
 
-# Função principal
+# Análise e envio de alertas
 def monitorar():
     for ativo in ATIVOS:
         for tf in TIMEFRAMES:
@@ -55,40 +55,39 @@ def monitorar():
                     f"Fibonacci: {analise['fibonacci']}\n"
                 )
 
-                if analise["alerta"]:
+                if analise.get("alerta"):
                     mensagem += f"🚨 Alerta: {analise['alerta']}\n"
-
                 if oco:
-                    mensagem += f"🧠 Padrão OCO detectado\n"
+                    mensagem += "🧠 Padrão OCO detectado\n"
                 if triangulo:
-                    mensagem += f"🔺 Triângulo detectado\n"
+                    mensagem += "🔺 Triângulo detectado\n"
                 if cunha:
-                    mensagem += f"📐 Cunha detectada\n"
+                    mensagem += "📐 Cunha detectada\n"
 
                 enviar_alerta(mensagem)
 
             except Exception as e:
-                print(f"Erro com {ativo} ({tf}):", e)
+                print(f"❌ Erro ao analisar {ativo} ({tf}):", e)
 
-# Rota principal
+# Página principal
 @app.route('/')
 def index():
-    return "✅ Bot com alertas inteligentes iniciado"
+    return "✅ Bot com alertas inteligentes está rodando"
 
-# Rota de teste de alerta
+# Rota de teste
 @app.route('/test-alert')
 def testar_alerta():
-    mensagem = "🧪 Alerta de teste manual disparado via navegador!"
-    enviar_alerta(mensagem)
-    return "✅ Alerta enviado com sucesso para Discord e Telegram!"
+    enviar_alerta("🧪 Alerta de teste manual enviado via navegador!")
+    return "✅ Alerta enviado com sucesso!"
 
-# Loop em segundo plano
+# Loop de agendamento
 def iniciar_agendamento():
-    schedule.every(15).minutes.do(monitorar)
+    schedule.every(2).minutes.do(monitorar)
     while True:
         schedule.run_pending()
         time.sleep(1)
 
+# Executar
 if __name__ == "__main__":
     threading.Thread(target=iniciar_agendamento).start()
     app.run(debug=False, host="0.0.0.0", port=10000)
