@@ -1,143 +1,161 @@
 import os
 import time
+import threading
 import requests
-import schedule
 import pandas as pd
-import datetime
-import matplotlib.pyplot as plt
-from flask import Flask
+import schedule
+from flask import Flask, jsonify
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from padroes import detectar_oco, detectar_triangulo, detectar_cunha
+import matplotlib.pyplot as plt
 
 app = Flask(__name__)
 
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "http://localhost:10000")
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "AAVEUSDT", "XRPUSDT", "SOLUSDT", "WIFUSDT", "AEROUSDT", "HYPEUSDT"]
-TIMEFRAMES = {
-    "15m": "15",
-    "1h": "60",
-    "4h": "240"
-}
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "HYPEUSDT", "WIFUSDT", "AEROUSDT"]
+intervalos = {"15m": "15", "1h": "60", "4h": "240"}
+ultimos_alertas = {}
 
-def get_klines(symbol, interval):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=200"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        data = response.json()["result"]["list"]
-        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
-        df.set_index("timestamp", inplace=True)
-        df = df.astype(float)
-        return df
-    except Exception as e:
-        print(f"Erro ao buscar dados de {symbol} [{interval}]: {e}")
-        return None
+def enviar_alerta(mensagem):
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
+            requests.post(url, data=data)
+        except:
+            print("Erro Telegram")
 
-def calculate_indicators(df):
-    rsi = RSIIndicator(close=df["close"], window=14).rsi()
-    ema9 = EMAIndicator(close=df["close"], window=9).ema_indicator()
-    ema21 = EMAIndicator(close=df["close"], window=21).ema_indicator()
-    ema50 = EMAIndicator(close=df["close"], window=50).ema_indicator()
-    ema200 = EMAIndicator(close=df["close"], window=200).ema_indicator()
-    return rsi, ema9, ema21, ema50, ema200
+    if DISCORD_WEBHOOK_URL:
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json={"content": mensagem})
+        except:
+            print("Erro Discord")
 
-def generate_chart(df, symbol, tf):
+def enviar_imagem(img_path):
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        files = {'photo': open(img_path, 'rb')}
+        data = {"chat_id": TELEGRAM_CHAT_ID}
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        requests.post(url, data=data, files=files)
+
+def calcular_fibonacci(df):
+    high = df['high'].max()
+    low = df['low'].min()
+    diff = high - low
+    return {
+        '0.236': high - 0.236 * diff,
+        '0.382': high - 0.382 * diff,
+        '0.5': high - 0.5 * diff,
+        '0.618': high - 0.618 * diff,
+        '0.786': high - 0.786 * diff,
+    }
+
+def plotar_grafico(df, symbol, tf_nome):
     plt.figure(figsize=(10, 4))
-    plt.plot(df["close"], label="Preço")
-    plt.plot(EMAIndicator(close=df["close"], window=9).ema_indicator(), label="EMA 9")
-    plt.plot(EMAIndicator(close=df["close"], window=21).ema_indicator(), label="EMA 21")
-    plt.plot(EMAIndicator(close=df["close"], window=50).ema_indicator(), label="EMA 50")
-    plt.plot(EMAIndicator(close=df["close"], window=200).ema_indicator(), label="EMA 200")
-    plt.title(f"{symbol} - {tf}")
+    df['close'].plot(label='Preço')
+    EMAIndicator(df["close"], window=50).ema_indicator().plot(label='EMA 50')
+    EMAIndicator(df["close"], window=200).ema_indicator().plot(label='EMA 200')
+    plt.title(f"{symbol} - {tf_nome}")
     plt.legend()
-    filename = f"{symbol}_{tf}_chart.png"
-    plt.savefig(filename)
+    img_path = f"/tmp/{symbol}_{tf_nome}.png"
+    plt.savefig(img_path)
     plt.close()
-    return filename
+    return img_path
 
-def send_discord(msg, img_path=None):
-    data = {"content": msg}
-    files = {"file": open(img_path, "rb")} if img_path else None
-    try:
-        requests.post(DISCORD_WEBHOOK, data=data, files=files)
-    except Exception as e:
-        print("Erro Discord:", e)
+def alerta_repetido(chave):
+    agora = time.time()
+    if chave in ultimos_alertas and agora - ultimos_alertas[chave] < 3600:
+        return True
+    ultimos_alertas[chave] = agora
+    return False
 
-def send_telegram(msg, img_path=None):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
-        if img_path:
-            img_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
-            files = {"photo": open(img_path, "rb")}
-            requests.post(img_url, data={"chat_id": TELEGRAM_CHAT_ID}, files=files)
-    except Exception as e:
-        print("Erro Telegram:", e)
+def analisar_mercado():
+    for simbolo in symbols:
+        for tf_nome, tf in intervalos.items():
+            try:
+                url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={simbolo}&interval={tf}&limit=200"
+                r = requests.get(url)
+                candles = r.json()["result"]["list"]
+                df = pd.DataFrame(candles, columns=[
+                    "timestamp", "open", "high", "low", "close", "volume", "_"
+                ])
+                df = df.astype(float)
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
+                df.set_index("timestamp", inplace=True)
 
-def build_summary(symbol, tf, df, rsi, ema9, ema21, ema50, ema200):
-    last_price = df["close"].iloc[-1]
-    last_rsi = rsi.iloc[-1]
-    text = f"🕒 {symbol} - {tf} \n"
-    text += f"💰 Preço: {last_price:.2f} | RSI: {last_rsi:.2f}\n"
-    text += f"📉 EMA9: {ema9.iloc[-1]:.2f} | EMA21: {ema21.iloc[-1]:.2f} | EMA50: {ema50.iloc[-1]:.2f} | EMA200: {ema200.iloc[-1]:.2f}\n"
+                rsi = RSIIndicator(df["close"]).rsi().iloc[-1]
+                ema9 = EMAIndicator(df["close"], window=9).ema_indicator().iloc[-1]
+                ema21 = EMAIndicator(df["close"], window=21).ema_indicator().iloc[-1]
+                ema50 = EMAIndicator(df["close"], window=50).ema_indicator().iloc[-1]
+                ema200 = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
+                preco_atual = df["close"].iloc[-1]
+                fibs = calcular_fibonacci(df)
 
-    if last_rsi >= 70:
-        text += "⚠️ RSI em sobrecompra!\n"
-    elif last_rsi <= 30:
-        text += "⚠️ RSI em sobrevenda!\n"
+                mensagem = f"\n📊 *{simbolo}* [{tf_nome}]\n"
+                mensagem += f"• 💰 Preço: {preco_atual:.2f}\n"
+                mensagem += f"• 📈 RSI: {rsi:.2f}\n"
+                if rsi > 70:
+                    mensagem += "  ⚠️ RSI acima de 70 (sobrecompra)\n"
+                elif rsi < 30:
+                    mensagem += "  ⚠️ RSI abaixo de 30 (sobrevenda)\n"
 
-    if ema9.iloc[-2] < ema21.iloc[-2] and ema9.iloc[-1] > ema21.iloc[-1]:
-        text += "✅ Cruzamento de Alta (EMA 9 > EMA 21)\n"
-    elif ema9.iloc[-2] > ema21.iloc[-2] and ema9.iloc[-1] < ema21.iloc[-1]:
-        text += "⚠️ Cruzamento de Baixa (EMA 9 < EMA 21)\n"
+                mensagem += f"• 🟨 EMA 9: {ema9:.2f} | EMA 21: {ema21:.2f}\n"
+                mensagem += f"• 🟩 EMA 50: {ema50:.2f} | EMA 200: {ema200:.2f}\n"
+                mensagem += f"• 🔢 Fibonacci:\n"
+                for nivel, valor in fibs.items():
+                    mensagem += f"   - {nivel}: {valor:.2f}\n"
 
-    if ema50.iloc[-2] < ema200.iloc[-2] and ema50.iloc[-1] > ema200.iloc[-1]:
-        text += "🚀 Golden Cross\n"
-    elif ema50.iloc[-2] > ema200.iloc[-2] and ema50.iloc[-1] < ema200.iloc[-1]:
-        text += "🛑 Death Cross\n"
+                if ema9 > ema21 and df["close"].iloc[-2] < ema21 and not alerta_repetido(f"{simbolo}_{tf_nome}_cross_up"):
+                    mensagem += "• ✅ Cruzamento de alta detectado (EMA 9 > EMA 21)\n"
+                if ema9 < ema21 and df["close"].iloc[-2] > ema21 and not alerta_repetido(f"{simbolo}_{tf_nome}_cross_down"):
+                    mensagem += "• ⚠️ Cruzamento de baixa detectado (EMA 9 < EMA 21)\n"
 
-    oco = detectar_oco(df)
-    triangulo = detectar_triangulo(df)
-    cunha = detectar_cunha(df)
+                if detectar_oco(df) and not alerta_repetido(f"{simbolo}_{tf_nome}_oco"):
+                    mensagem += "• 📉 Padrão OCO detectado!\n"
+                if detectar_triangulo(df) and not alerta_repetido(f"{simbolo}_{tf_nome}_triangulo"):
+                    mensagem += "• 🔺 Padrão Triângulo detectado!\n"
+                if detectar_cunha(df) and not alerta_repetido(f"{simbolo}_{tf_nome}_cunha"):
+                    mensagem += "• 🔻 Padrão Cunha detectada!\n"
 
-    if oco: text += oco + "\n"
-    if triangulo: text += triangulo + "\n"
-    if cunha: text += cunha + "\n"
+                enviar_alerta(mensagem)
+                imagem = plotar_grafico(df, simbolo, tf_nome)
+                enviar_imagem(imagem)
 
-    return text
-
-def analyze_all():
-    print("📊 Iniciando análise múltiplos timeframes...")
-    for symbol in SYMBOLS:
-        for tf_name, interval in TIMEFRAMES.items():
-            df = get_klines(symbol, interval)
-            if df is not None:
-                rsi, ema9, ema21, ema50, ema200 = calculate_indicators(df)
-                resumo = build_summary(symbol, tf_name, df, rsi, ema9, ema21, ema50, ema200)
-                chart = generate_chart(df, symbol, tf_name)
-                send_discord(resumo, chart)
-                send_telegram(resumo, chart)
-
-schedule.every().hour.do(analyze_all)
+            except Exception as e:
+                print(f"Erro em {simbolo}-{tf_nome}: {e}")
 
 @app.route("/")
 def status():
-    return "✅ Bot Multi-Timeframe rodando!"
+    return jsonify({"status": "Bot rodando", "ativos": symbols})
 
-def run_scheduler():
+@app.route("/test")
+def teste():
+    enviar_alerta("🧪 Teste de funcionamento do bot")
+    return jsonify({"teste": "ok"})
+
+def keep_alive():
+    while True:
+        try:
+            requests.get(f"{RENDER_EXTERNAL_URL}/")
+            print("✅ Keep-alive ping enviado")
+        except:
+            print("⚠️ Falha no Keep-alive")
+        time.sleep(300)
+
+def agendar():
+    schedule.every(1).hours.do(analisar_mercado)
     while True:
         schedule.run_pending()
-        time.sleep(1)
+        time.sleep(30)
 
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=run_scheduler).start()
+    print("🚀 Bot com alertas inteligentes iniciado")
+    threading.Thread(target=agendar, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
     app.run(host="0.0.0.0", port=10000)
-
-
 
