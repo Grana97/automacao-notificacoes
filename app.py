@@ -3,8 +3,10 @@ import requests
 import os
 from flask import Flask, jsonify
 from threading import Thread
-import schedule
 from datetime import datetime
+import schedule
+import pandas as pd
+import ta
 
 app = Flask(__name__)
 
@@ -15,12 +17,11 @@ app_status = {
     "status": "Rodando"
 }
 
-CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "AAVEUSDT", "XRPUSDT"]
+CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "WIFUSDT", "AEROUSDT", "HYPEUSDT"]
 BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 last_notification_time = {}
-last_hourly_summary_time = None
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
@@ -47,134 +48,85 @@ def enviar_telegram(mensagem):
         print(f"Erro Telegram: {e}")
         return False
 
-def calcular_rsi(prices):
-    if len(prices) < 15:
-        return 50
-    gains, losses = [], []
-    for i in range(1, len(prices)):
-        delta = prices[i] - prices[i - 1]
-        gains.append(max(delta, 0))
-        losses.append(max(-delta, 0))
-    avg_gain = sum(gains[-14:]) / 14
-    avg_loss = sum(losses[-14:]) / 14
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return round(100 - (100 / (1 + rs)), 2)
-
-def calcular_ema(prices, period):
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for price in prices[1:]:
-        ema = price * k + ema * (1 - k)
-    return round(ema, 2)
-
-def calcular_fibonacci(high, low):
-    diff = high - low
-    return {
-        "0.236": round(high - 0.236 * diff, 2),
-        "0.382": round(high - 0.382 * diff, 2),
-        "0.5": round(high - 0.5 * diff, 2),
-        "0.618": round(high - 0.618 * diff, 2),
-        "0.786": round(high - 0.786 * diff, 2),
-    }
-
-def buscar_dados_bybit(symbol="BTCUSDT", interval="60", limit=200):
+def buscar_dados(symbol, interval="60", limit=100):
     try:
-        url = f"{BYBIT_URL}?category=spot&symbol={symbol}&interval={interval}&limit={limit}"
+        url = f"{BYBIT_URL}?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
         response = requests.get(url, timeout=10)
+        response.raise_for_status()
         data = response.json().get("result", {}).get("list", [])
-        closes = [float(c[4]) for c in data]
-        highs = [float(c[2]) for c in data]
-        lows = [float(c[3]) for c in data]
-        closes.reverse()
-        highs.reverse()
-        lows.reverse()
-        return closes, highs, lows
+        if not data:
+            raise ValueError("Sem dados retornados")
+        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
+        df["close"] = df["close"].astype(float)
+        return df
     except Exception as e:
-        print(f"Erro BYBIT: {e}")
-        return [], [], []
+        print(f"Erro ao buscar dados de {symbol}: {e}")
+        return pd.DataFrame()
 
-def analisar():
-    global last_notification_time, last_hourly_summary_time
-    agora = datetime.now()
-    resumo = f"📊 Resumo Cripto {agora.strftime('%H:%M')}\n\n"
-    alerts = []
+def calcular_indicadores(df):
+    if df.empty or len(df) < 30:
+        return 0, 0, 0
+    rsi = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi().iloc[-1]
+    ema9 = ta.trend.EMAIndicator(close=df["close"], window=9).ema_indicator().iloc[-1]
+    ema21 = ta.trend.EMAIndicator(close=df["close"], window=21).ema_indicator().iloc[-1]
+    return round(rsi, 2), round(ema9, 2), round(ema21, 2)
 
+def enviar_resumo():
+    mensagem = "📊 *Resumo de Mercado (Bybit)* 📊\n"
     for symbol in CRYPTO_SYMBOLS:
-        closes, highs, lows = buscar_dados_bybit(symbol)
-        if not closes:
+        df = buscar_dados(symbol)
+        if df.empty:
             continue
+        preco = round(df["close"].iloc[-1], 2)
+        rsi, ema9, ema21 = calcular_indicadores(df)
+        mensagem += f"\n*{symbol.replace('USDT', '')}*: ${preco} | RSI: {rsi} | EMA9: {ema9} | EMA21: {ema21}"
+    enviar_discord(mensagem)
+    enviar_telegram(mensagem)
+    app_status["ultima_notificacao"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    app_status["total_notificacoes"] += 1
 
-        price = closes[-1]
-        rsi = calcular_rsi(closes)
-        ema_12 = calcular_ema(closes[-12:], 12)
-        ema_26 = calcular_ema(closes[-26:], 26)
-        ema_200 = calcular_ema(closes[-200:], 200)
-        fibo = calcular_fibonacci(max(highs), min(lows))
+def verificar_alertas():
+    for symbol in CRYPTO_SYMBOLS:
+        df = buscar_dados(symbol)
+        if df.empty:
+            continue
+        preco = round(df["close"].iloc[-1], 2)
+        rsi, ema9, ema21 = calcular_indicadores(df)
+        alerta = ""
+        if rsi < 30:
+            alerta += f"🔻 RSI abaixo de 30 em {symbol}!"
+        elif rsi > 70:
+            alerta += f"🚀 RSI acima de 70 em {symbol}!"
+        if preco > ema9 > ema21:
+            alerta += f" 📈 Tendência de alta (Preço > EMA9 > EMA21)"
+        elif preco < ema9 < ema21:
+            alerta += f" 📉 Tendência de baixa (Preço < EMA9 < EMA21)"
+        if alerta:
+            mensagem = f"⚠️ Alerta para {symbol}:\nPreço: ${preco} | RSI: {rsi} | EMA9: {ema9} | EMA21: {ema21}\n{alerta}"
+            enviar_discord(mensagem)
+            enviar_telegram(mensagem)
 
-        direcao = "📈" if price > ema_12 > ema_26 else "📉" if price < ema_12 < ema_26 else "🔄"
-        status = f"{direcao} {symbol}\n💰 ${price:.2f} | RSI: {rsi} | EMAs: 12={ema_12}, 26={ema_26}, 200={ema_200}\n🔢 Fib: {fibo['0.236']} / {fibo['0.5']} / {fibo['0.618']}\n"
-        resumo += status + "\n"
+def agendador():
+    schedule.every(1).hours.do(enviar_resumo)
+    while True:
+        schedule.run_pending()
+        verificar_alertas()
+        time.sleep(60)
 
-        if abs(rsi - 50) > 20:
-            key = f"{symbol}_rsi_{int(agora.timestamp()) // 900}"
-            if key not in last_notification_time:
-                alerta = f"🚨 {symbol} RSI: {rsi} | Preço: ${price:.2f}"
-                alerts.append(alerta)
-                last_notification_time[key] = agora
-
-    for alert in alerts:
-        enviar_discord(alert)
-        enviar_telegram(alert)
-        print(f"🔔 Alerta: {alert}")
-        app_status["ultima_notificacao"] = alert
-        app_status["total_notificacoes"] += 1
-
-    if not last_hourly_summary_time or (agora - last_hourly_summary_time).seconds >= 3600:
-        enviar_discord(resumo)
-        enviar_telegram(resumo)
-        last_hourly_summary_time = agora
-        app_status["ultima_notificacao"] = f"Resumo {agora.strftime('%H:%M')}"
-        app_status["total_notificacoes"] += 1
-        print("📬 Resumo horário enviado")
-
-@app.route('/')
-def home():
-    return jsonify(app_status)
-
-@app.route('/status')
+@app.route("/status", methods=["GET"])
 def status():
     return jsonify(app_status)
 
-@app.route('/test')
-def test():
-    msg = f"🧪 Teste do bot às {datetime.now().strftime('%H:%M:%S')}"
-    enviar_discord(msg)
-    enviar_telegram(msg)
-    return jsonify({"status": "enviado", "hora": datetime.now().strftime('%H:%M:%S')})
-
-def agendar():
-    schedule.every(5).minutes.do(analisar)
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-
-def keep_alive():
-    url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:5000")
-    while True:
-        try:
-            requests.get(f"{url}/status")
-            print("✅ Keep-alive")
-        except:
-            print("❌ Falha Keep-alive")
-        time.sleep(300)
+@app.route("/", methods=["GET"])
+def home():
+    return "🚀 Bot com Bybit iniciado!"
 
 if __name__ == "__main__":
     print("🚀 Bot com Bybit iniciado!")
-    Thread(target=agendar, daemon=True).start()
-    Thread(target=keep_alive, daemon=True).start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    thread = Thread(target=agendador)
+    thread.daemon = True
+    thread.start()
+    app.run(host="0.0.0.0", port=10000)
+
 
 
