@@ -1,6 +1,6 @@
-flask
+Flask
 requests
 schedule
 pandas
-matplotlib
 ta
+matplotlib
