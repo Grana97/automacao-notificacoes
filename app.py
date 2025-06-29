@@ -18,14 +18,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ATIVOS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "HYPEUSDT", "WIFUSDT", "AEROUSDT"]
 TIMEFRAMES = ["15m", "1h", "4h"]
 
-# Funções de envio
+# Função para enviar alerta para Telegram e Discord
 def enviar_alerta(mensagem):
     # Discord
     if DISCORD_WEBHOOK:
         try:
             requests.post(DISCORD_WEBHOOK, json={"content": mensagem})
         except Exception as e:
-            print("Erro Discord:", e)
+            print("Erro ao enviar para Discord:", e)
+
     # Telegram
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         try:
@@ -33,9 +34,9 @@ def enviar_alerta(mensagem):
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
             requests.post(url, data=data)
         except Exception as e:
-            print("Erro Telegram:", e)
+            print("Erro ao enviar para Telegram:", e)
 
-# Função principal
+# Função principal de monitoramento
 def monitorar():
     for ativo in ATIVOS:
         for tf in TIMEFRAMES:
@@ -57,30 +58,30 @@ def monitorar():
                     mensagem += f"🚨 Alerta: {analise['alerta']}\n"
 
                 if oco:
-                    mensagem += f"🧠 Padrão OCO detectado\n"
+                    mensagem += "🧠 Padrão OCO detectado\n"
                 if triangulo:
-                    mensagem += f"🔺 Triângulo detectado\n"
+                    mensagem += "🔺 Triângulo detectado\n"
                 if cunha:
-                    mensagem += f"📐 Cunha detectada\n"
+                    mensagem += "📐 Cunha detectada\n"
 
                 enviar_alerta(mensagem)
 
             except Exception as e:
-                print(f"Erro com {ativo} ({tf}):", e)
+                print(f"Erro ao analisar {ativo} ({tf}):", e)
 
-# Rota principal
+# Página principal
 @app.route('/')
 def index():
-    return "✅ Bot com alertas inteligentes iniciado"
+    return "✅ Bot com alertas inteligentes iniciado com sucesso!"
 
 # Rota de teste de alerta
 @app.route('/test-alert')
-def testar_alerta():
-    mensagem = "🧪 Alerta de teste manual disparado via navegador!"
+def test_alert():
+    mensagem = "🧪 Alerta de teste manual disparado com sucesso!"
     enviar_alerta(mensagem)
-    return "✅ Alerta enviado com sucesso para Discord e Telegram!"
+    return "✅ Alerta de teste enviado com sucesso para Discord e Telegram!"
 
-# Loop em segundo plano
+# Função para agendar a execução contínua
 def iniciar_agendamento():
     schedule.every(15).minutes.do(monitorar)
     while True:
