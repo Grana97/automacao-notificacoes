@@ -1,131 +1,142 @@
+import os
 import time
 import requests
-import os
-from flask import Flask, jsonify
-from threading import Thread
-from datetime import datetime
 import schedule
 import pandas as pd
-import ta
+import datetime
+import matplotlib.pyplot as plt
+from flask import Flask
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator
+from padroes import detectar_oco, detectar_triangulo, detectar_cunha
 
 app = Flask(__name__)
 
-app_status = {
-    "iniciado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    "ultima_notificacao": "Nenhuma ainda",
-    "total_notificacoes": 0,
-    "status": "Rodando"
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "AAVEUSDT", "XRPUSDT", "SOLUSDT", "WIFUSDT", "AEROUSDT", "HYPEUSDT"]
+TIMEFRAMES = {
+    "15m": "15",
+    "1h": "60",
+    "4h": "240"
 }
 
-CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "WIFUSDT", "AEROUSDT", "HYPEUSDT"]
-BYBIT_URL = "https://api.bybit.com/v5/market/kline"
-last_notification_time = {}
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
-
-def enviar_discord(mensagem):
-    if not DISCORD_WEBHOOK:
-        print("❌ Webhook Discord não configurado")
-        return False
+def get_klines(symbol, interval):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit=200"
     try:
-        response = requests.post(DISCORD_WEBHOOK, json={"content": mensagem}, timeout=10)
-        return response.status_code in [200, 204]
-    except Exception as e:
-        print(f"Erro Discord: {e}")
-        return False
-
-def enviar_telegram(mensagem):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("❌ Telegram não configurado")
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        response = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": mensagem})
-        return response.status_code == 200
-    except Exception as e:
-        print(f"Erro Telegram: {e}")
-        return False
-
-def buscar_dados(symbol, interval="60", limit=100):
-    try:
-        url = f"{BYBIT_URL}?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-        response = requests.get(url, timeout=10)
+        response = requests.get(url)
         response.raise_for_status()
-        data = response.json().get("result", {}).get("list", [])
-        if not data:
-            raise ValueError("Sem dados retornados")
+        data = response.json()["result"]["list"]
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-        df["close"] = df["close"].astype(float)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
+        df.set_index("timestamp", inplace=True)
+        df = df.astype(float)
         return df
     except Exception as e:
-        print(f"Erro ao buscar dados de {symbol}: {e}")
-        return pd.DataFrame()
+        print(f"Erro ao buscar dados de {symbol} [{interval}]: {e}")
+        return None
 
-def calcular_indicadores(df):
-    if df.empty or len(df) < 30:
-        return 0, 0, 0
-    rsi = ta.momentum.RSIIndicator(close=df["close"], window=14).rsi().iloc[-1]
-    ema9 = ta.trend.EMAIndicator(close=df["close"], window=9).ema_indicator().iloc[-1]
-    ema21 = ta.trend.EMAIndicator(close=df["close"], window=21).ema_indicator().iloc[-1]
-    return round(rsi, 2), round(ema9, 2), round(ema21, 2)
+def calculate_indicators(df):
+    rsi = RSIIndicator(close=df["close"], window=14).rsi()
+    ema9 = EMAIndicator(close=df["close"], window=9).ema_indicator()
+    ema21 = EMAIndicator(close=df["close"], window=21).ema_indicator()
+    ema50 = EMAIndicator(close=df["close"], window=50).ema_indicator()
+    ema200 = EMAIndicator(close=df["close"], window=200).ema_indicator()
+    return rsi, ema9, ema21, ema50, ema200
 
-def enviar_resumo():
-    mensagem = "📊 *Resumo de Mercado (Bybit)* 📊\n"
-    for symbol in CRYPTO_SYMBOLS:
-        df = buscar_dados(symbol)
-        if df.empty:
-            continue
-        preco = round(df["close"].iloc[-1], 2)
-        rsi, ema9, ema21 = calcular_indicadores(df)
-        mensagem += f"\n*{symbol.replace('USDT', '')}*: ${preco} | RSI: {rsi} | EMA9: {ema9} | EMA21: {ema21}"
-    enviar_discord(mensagem)
-    enviar_telegram(mensagem)
-    app_status["ultima_notificacao"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    app_status["total_notificacoes"] += 1
+def generate_chart(df, symbol, tf):
+    plt.figure(figsize=(10, 4))
+    plt.plot(df["close"], label="Preço")
+    plt.plot(EMAIndicator(close=df["close"], window=9).ema_indicator(), label="EMA 9")
+    plt.plot(EMAIndicator(close=df["close"], window=21).ema_indicator(), label="EMA 21")
+    plt.plot(EMAIndicator(close=df["close"], window=50).ema_indicator(), label="EMA 50")
+    plt.plot(EMAIndicator(close=df["close"], window=200).ema_indicator(), label="EMA 200")
+    plt.title(f"{symbol} - {tf}")
+    plt.legend()
+    filename = f"{symbol}_{tf}_chart.png"
+    plt.savefig(filename)
+    plt.close()
+    return filename
 
-def verificar_alertas():
-    for symbol in CRYPTO_SYMBOLS:
-        df = buscar_dados(symbol)
-        if df.empty:
-            continue
-        preco = round(df["close"].iloc[-1], 2)
-        rsi, ema9, ema21 = calcular_indicadores(df)
-        alerta = ""
-        if rsi < 30:
-            alerta += f"🔻 RSI abaixo de 30 em {symbol}!"
-        elif rsi > 70:
-            alerta += f"🚀 RSI acima de 70 em {symbol}!"
-        if preco > ema9 > ema21:
-            alerta += f" 📈 Tendência de alta (Preço > EMA9 > EMA21)"
-        elif preco < ema9 < ema21:
-            alerta += f" 📉 Tendência de baixa (Preço < EMA9 < EMA21)"
-        if alerta:
-            mensagem = f"⚠️ Alerta para {symbol}:\nPreço: ${preco} | RSI: {rsi} | EMA9: {ema9} | EMA21: {ema21}\n{alerta}"
-            enviar_discord(mensagem)
-            enviar_telegram(mensagem)
+def send_discord(msg, img_path=None):
+    data = {"content": msg}
+    files = {"file": open(img_path, "rb")} if img_path else None
+    try:
+        requests.post(DISCORD_WEBHOOK, data=data, files=files)
+    except Exception as e:
+        print("Erro Discord:", e)
 
-def agendador():
-    schedule.every(1).hours.do(enviar_resumo)
+def send_telegram(msg, img_path=None):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg})
+        if img_path:
+            img_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+            files = {"photo": open(img_path, "rb")}
+            requests.post(img_url, data={"chat_id": TELEGRAM_CHAT_ID}, files=files)
+    except Exception as e:
+        print("Erro Telegram:", e)
+
+def build_summary(symbol, tf, df, rsi, ema9, ema21, ema50, ema200):
+    last_price = df["close"].iloc[-1]
+    last_rsi = rsi.iloc[-1]
+    text = f"🕒 {symbol} - {tf} \n"
+    text += f"💰 Preço: {last_price:.2f} | RSI: {last_rsi:.2f}\n"
+    text += f"📉 EMA9: {ema9.iloc[-1]:.2f} | EMA21: {ema21.iloc[-1]:.2f} | EMA50: {ema50.iloc[-1]:.2f} | EMA200: {ema200.iloc[-1]:.2f}\n"
+
+    if last_rsi >= 70:
+        text += "⚠️ RSI em sobrecompra!\n"
+    elif last_rsi <= 30:
+        text += "⚠️ RSI em sobrevenda!\n"
+
+    if ema9.iloc[-2] < ema21.iloc[-2] and ema9.iloc[-1] > ema21.iloc[-1]:
+        text += "✅ Cruzamento de Alta (EMA 9 > EMA 21)\n"
+    elif ema9.iloc[-2] > ema21.iloc[-2] and ema9.iloc[-1] < ema21.iloc[-1]:
+        text += "⚠️ Cruzamento de Baixa (EMA 9 < EMA 21)\n"
+
+    if ema50.iloc[-2] < ema200.iloc[-2] and ema50.iloc[-1] > ema200.iloc[-1]:
+        text += "🚀 Golden Cross\n"
+    elif ema50.iloc[-2] > ema200.iloc[-2] and ema50.iloc[-1] < ema200.iloc[-1]:
+        text += "🛑 Death Cross\n"
+
+    oco = detectar_oco(df)
+    triangulo = detectar_triangulo(df)
+    cunha = detectar_cunha(df)
+
+    if oco: text += oco + "\n"
+    if triangulo: text += triangulo + "\n"
+    if cunha: text += cunha + "\n"
+
+    return text
+
+def analyze_all():
+    print("📊 Iniciando análise múltiplos timeframes...")
+    for symbol in SYMBOLS:
+        for tf_name, interval in TIMEFRAMES.items():
+            df = get_klines(symbol, interval)
+            if df is not None:
+                rsi, ema9, ema21, ema50, ema200 = calculate_indicators(df)
+                resumo = build_summary(symbol, tf_name, df, rsi, ema9, ema21, ema50, ema200)
+                chart = generate_chart(df, symbol, tf_name)
+                send_discord(resumo, chart)
+                send_telegram(resumo, chart)
+
+schedule.every().hour.do(analyze_all)
+
+@app.route("/")
+def status():
+    return "✅ Bot Multi-Timeframe rodando!"
+
+def run_scheduler():
     while True:
         schedule.run_pending()
-        verificar_alertas()
-        time.sleep(60)
-
-@app.route("/status", methods=["GET"])
-def status():
-    return jsonify(app_status)
-
-@app.route("/", methods=["GET"])
-def home():
-    return "🚀 Bot com Bybit iniciado!"
+        time.sleep(1)
 
 if __name__ == "__main__":
-    print("🚀 Bot com Bybit iniciado!")
-    thread = Thread(target=agendador)
-    thread.daemon = True
-    thread.start()
+    import threading
+    threading.Thread(target=run_scheduler).start()
     app.run(host="0.0.0.0", port=10000)
 
 
