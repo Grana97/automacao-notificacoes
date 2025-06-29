@@ -5,10 +5,10 @@ from flask import Flask, jsonify
 from threading import Thread
 import schedule
 from datetime import datetime
+import math
 
 app = Flask(__name__)
 
-# Status da aplicação
 app_status = {
     "iniciado_em": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "ultima_notificacao": "Nenhuma ainda",
@@ -16,135 +16,78 @@ app_status = {
     "status": "Rodando"
 }
 
-# Configurações de criptomoedas
-CRYPTO_SYMBOLS = ["bitcoin", "ethereum", "solana", "aave", "ripple"]
-COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price"
-VS_CURRENCY = "usd"
-
-# Telegram
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
-# Discord
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
-
-# Cache
+CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "AAVEUSDT", "XRPUSDT"]
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
 last_notification_time = {}
 last_hourly_summary_time = None
 
-@app.route('/')
-def home():
-    html = f"""
-    <h1>🤖 Bot de Cripto via CoinGecko</h1>
-    <p><strong>Status:</strong> ✅ Ativo</p>
-    <p><strong>Iniciado em:</strong> {app_status['iniciado_em']}</p>
-    <p><strong>Total enviadas:</strong> {app_status['total_notificacoes']}</p>
-    <p><strong>Última:</strong> {app_status['ultima_notificacao']}</p>
-    <br>
-    <a href="/status">Status JSON</a> | <a href="/test">Testar</a>
-    """
-    return html
-
-@app.route('/status')
-def status():
-    return jsonify(app_status)
-
-@app.route('/test')
-def test_notification():
-    try:
-        enviar_notificacao("🧪 Teste de funcionamento do bot de cripto via CoinGecko!")
-        return jsonify({"message": "Teste enviado!", "status": "success"})
-    except Exception as e:
-        return jsonify({"message": f"Erro: {str(e)}", "status": "error"})
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
 def enviar_discord(mensagem):
     if not DISCORD_WEBHOOK:
+        print("❌ Webhook Discord não configurado")
         return False
-    data = {"content": mensagem, "username": "CryptoBot"}
-    response = requests.post(DISCORD_WEBHOOK, json=data)
-    return response.status_code in [200, 204]
+    try:
+        response = requests.post(DISCORD_WEBHOOK, json={"content": mensagem}, timeout=10)
+        return response.status_code in [200, 204]
+    except Exception as e:
+        print(f"Erro Discord: {e}")
+        return False
 
 def enviar_telegram(mensagem):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Telegram não configurado")
         return False
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
-    response = requests.post(url, data=payload)
-    return response.status_code == 200
-
-def enviar_notificacao(mensagem):
-    sucesso_discord = enviar_discord(mensagem)
-    sucesso_telegram = enviar_telegram(mensagem)
-    if sucesso_discord or sucesso_telegram:
-        app_status["ultima_notificacao"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        app_status["total_notificacoes"] += 1
-    return sucesso_discord or sucesso_telegram
-
-def get_crypto_data():
     try:
-        params = {
-            "ids": ",".join(CRYPTO_SYMBOLS),
-            "vs_currencies": VS_CURRENCY,
-            "include_24hr_change": "true"
-        }
-        response = requests.get(COINGECKO_API_URL, params=params, timeout=10)
-        response.raise_for_status()
-        return response.json()
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        response = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": mensagem})
+        return response.status_code == 200
     except Exception as e:
-        print(f"Erro ao obter dados do CoinGecko: {e}")
-        return {}
+        print(f"Erro Telegram: {e}")
+        return False
 
-def realizar_analise():
-    global last_notification_time, last_hourly_summary_time
+def calcular_rsi(prices):
+    if len(prices) < 15:
+        return 50
+    gains = []
+    losses = []
+    for i in range(1, len(prices)):
+        delta = prices[i] - prices[i-1]
+        gains.append(max(delta, 0))
+        losses.append(max(-delta, 0))
+    avg_gain = sum(gains[-14:]) / 14
+    avg_loss = sum(losses[-14:]) / 14
+    if avg_loss == 0:
+        return 100
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
-    agora = datetime.now()
-    dados = get_crypto_data()
-    if not dados:
-        return
+def calcular_ema(prices, period):
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for price in prices[1:]:
+        ema = price * k + ema * (1 - k)
+    return round(ema, 2)
 
-    resumo = "📊 **Resumo Cripto (CoinGecko)** 📊\n\n"
-    alertas = []
+def calcular_fibonacci(high, low):
+    diff = high - low
+    levels = {
+        "0.236": round(high - 0.236 * diff, 2),
+        "0.382": round(high - 0.382 * diff, 2),
+        "0.5": round(high - 0.5 * diff, 2),
+        "0.618": round(high - 0.618 * diff, 2),
+        "0.786": round(high - 0.786 * diff, 2)
+    }
+    return levels
 
-    for simbolo in CRYPTO_SYMBOLS:
-        if simbolo not in dados:
-            continue
-        preco = dados[simbolo][VS_CURRENCY]
-        variacao = dados[simbolo].get(f"{VS_CURRENCY}_24h_change", 0)
-
-        status = "🟢" if variacao > 0 else "🔴" if variacao < -2 else "🟡"
-        resumo += f"{status} **{simbolo.upper()}**: ${preco:.2f} ({variacao:+.2f}%)\n"
-
-        key = f"{simbolo}_{int(agora.timestamp()) // 600}"
-        if abs(variacao) > 5 and key not in last_notification_time:
-            direcao = "📈" if variacao > 0 else "📉"
-            alertas.append(f"🚨 {simbolo.upper()}: {direcao} {variacao:+.2f}% - ${preco:.2f}")
-            last_notification_time[key] = agora
-
-    for alerta in alertas:
-        enviar_notificacao(alerta)
-
-    if not last_hourly_summary_time or (agora - last_hourly_summary_time).seconds >= 3600:
-        enviar_notificacao(resumo)
-        last_hourly_summary_time = agora
-
-def agendar_tarefas():
-    schedule.every(1).minutes.do(realizar_analise)
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
-
-def keep_alive():
-    url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:5000")
-    while True:
-        try:
-            requests.get(f"{url}/status", timeout=10)
-        except:
-            pass
-        time.sleep(300)
-
-if __name__ == "__main__":
-    enviar_notificacao("🚀 Bot de Cripto via CoinGecko online!")
-    Thread(target=agendar_tarefas, daemon=True).start()
-    Thread(target=keep_alive, daemon=True).start()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+def buscar_dados(symbol, interval="1h", limit=200):
+    try:
+        url = f"{BINANCE_URL}?symbol={symbol}&interval={interval}&limit={limit}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        closes = [float(k[4]) for k in data]
+        highs = [float(k[2]) for k in data]
+        lows
