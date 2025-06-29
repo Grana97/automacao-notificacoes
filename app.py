@@ -5,7 +5,6 @@ from flask import Flask, jsonify
 from threading import Thread
 import schedule
 from datetime import datetime
-import math
 
 app = Flask(__name__)
 
@@ -17,7 +16,7 @@ app_status = {
 }
 
 CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "AAVEUSDT", "XRPUSDT"]
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
+BYBIT_URL = "https://api.bybit.com/v5/market/kline"
 last_notification_time = {}
 last_hourly_summary_time = None
 
@@ -73,4 +72,121 @@ def calcular_ema(prices, period):
 
 def calcular_fibonacci(high, low):
     diff = high - low
-    levels
+    levels = {
+        "0.236": round(high - 0.236 * diff, 2),
+        "0.382": round(high - 0.382 * diff, 2),
+        "0.5": round(high - 0.5 * diff, 2),
+        "0.618": round(high - 0.618 * diff, 2),
+        "0.786": round(high - 0.786 * diff, 2)
+    }
+    return levels
+
+def buscar_dados(symbol, interval="60", limit=200):
+    try:
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}&interval={interval}&limit={limit}"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json().get("result", {}).get("list", [])
+        data.reverse()
+        closes = [float(c[4]) for c in data]
+        highs = [float(c[2]) for c in data]
+        lows = [float(c[3]) for c in data]
+        return closes, highs, lows
+    except Exception as e:
+        print(f"Erro buscando dados de {symbol} - {interval}: {e}")
+        return [], [], []
+
+def analisar():
+    global last_notification_time, last_hourly_summary_time
+
+    agora = datetime.now()
+    resumo = f"📊 **Resumo {agora.strftime('%H:%M')}**\n\n"
+    alerts = []
+    teve_dados = False
+
+    for symbol in CRYPTO_SYMBOLS:
+        closes, highs, lows = buscar_dados(symbol)
+        if not closes:
+            continue
+
+        teve_dados = True
+        price = closes[-1]
+        rsi = calcular_rsi(closes)
+        ema_12 = calcular_ema(closes[-12:], 12)
+        ema_26 = calcular_ema(closes[-26:], 26)
+        ema_200 = calcular_ema(closes[-200:], 200)
+        fibo = calcular_fibonacci(max(highs), min(lows))
+
+        direcao = "📈" if price > ema_12 > ema_26 else "📉" if price < ema_12 < ema_26 else "🔄"
+        status = f"{direcao} **{symbol}**\n💰Preço: ${price:.2f}\n📊 RSI: {rsi}\n📉 EMAs: 12={ema_12}, 26={ema_26}, 200={ema_200}\n🔢 Fibonacci: {fibo['0.236']} / {fibo['0.5']} / {fibo['0.618']}\n"
+        resumo += status + "\n"
+
+        if abs(rsi - 50) > 20:
+            key = f"{symbol}_rsi_{int(agora.timestamp()) // 900}"
+            if key not in last_notification_time:
+                alerta = f"🚨 Alerta {symbol} RSI: {rsi} | Preço: ${price:.2f}"
+                alerts.append(alerta)
+                last_notification_time[key] = agora
+
+    if not teve_dados:
+        resumo += "\n⚠️ Nenhum dado retornado da Bybit no momento."
+
+    for alert in alerts:
+        enviar_discord(alert)
+        enviar_telegram(alert)
+        print(f"🔔 Alerta: {alert}")
+        app_status["ultima_notificacao"] = alert
+        app_status["total_notificacoes"] += 1
+
+    if not last_hourly_summary_time or (agora - last_hourly_summary_time).seconds >= 3600:
+        enviar_discord(resumo)
+        enviar_telegram(resumo)
+        last_hourly_summary_time = agora
+        app_status["ultima_notificacao"] = f"Resumo {agora.strftime('%H:%M')}"
+        app_status["total_notificacoes"] += 1
+        print("📬 Resumo horário enviado")
+
+@app.route('/')
+def home():
+    return f"""
+    <h1>Bot Cripto Ativo (Bybit)</h1>
+    <p>Status: {app_status['status']}</p>
+    <p>Iniciado: {app_status['iniciado_em']}</p>
+    <p>Última: {app_status['ultima_notificacao']}</p>
+    <p>Total: {app_status['total_notificacoes']}</p>
+    """
+
+@app.route('/status')
+def status():
+    return jsonify(app_status)
+
+@app.route('/test')
+def test():
+    msg = f"🧪 Teste do bot às {datetime.now().strftime('%H:%M:%S')}"
+    enviar_discord(msg)
+    enviar_telegram(msg)
+    return jsonify({"status": "enviado", "hora": datetime.now().strftime('%H:%M:%S')})
+
+def agendar():
+    schedule.every(5).minutes.do(analisar)
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+def keep_alive():
+    url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:5000")
+    while True:
+        try:
+            requests.get(f"{url}/status")
+            print("✅ Keep-alive")
+        except:
+            print("❌ Falha Keep-alive")
+        time.sleep(300)
+
+if __name__ == "__main__":
+    print("🚀 Bot com Bybit iniciado!")
+    Thread(target=agendar, daemon=True).start()
+    Thread(target=keep_alive, daemon=True).start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
