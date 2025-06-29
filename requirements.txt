@@ -1,6 +1,9 @@
-Flask
-requests
+flask
 schedule
-pandas
-ta
+requests
 matplotlib
+numpy
+pandas
+ccxt
+ta
+
