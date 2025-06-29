@@ -18,25 +18,26 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 ATIVOS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AAVEUSDT", "XRPUSDT", "HYPEUSDT", "WIFUSDT", "AEROUSDT"]
 TIMEFRAMES = ["15m", "1h", "4h"]
 
-# Função para enviar alerta para Telegram e Discord
+# Funções de envio
 def enviar_alerta(mensagem):
     # Discord
     if DISCORD_WEBHOOK:
         try:
             requests.post(DISCORD_WEBHOOK, json={"content": mensagem})
         except Exception as e:
-            print("Erro ao enviar para Discord:", e)
-
+            print("Erro Discord:", e)
     # Telegram
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
             data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensagem}
-            requests.post(url, data=data)
+            resposta = requests.post(url, data=data)
+            if resposta.status_code != 200:
+                print("Erro Telegram:", resposta.status_code, resposta.text)
         except Exception as e:
-            print("Erro ao enviar para Telegram:", e)
+            print("Erro Telegram:", e)
 
-# Função principal de monitoramento
+# Função principal
 def monitorar():
     for ativo in ATIVOS:
         for tf in TIMEFRAMES:
@@ -58,30 +59,30 @@ def monitorar():
                     mensagem += f"🚨 Alerta: {analise['alerta']}\n"
 
                 if oco:
-                    mensagem += "🧠 Padrão OCO detectado\n"
+                    mensagem += f"🧠 Padrão OCO detectado\n"
                 if triangulo:
-                    mensagem += "🔺 Triângulo detectado\n"
+                    mensagem += f"🔺 Triângulo detectado\n"
                 if cunha:
-                    mensagem += "📐 Cunha detectada\n"
+                    mensagem += f"📐 Cunha detectada\n"
 
                 enviar_alerta(mensagem)
 
             except Exception as e:
-                print(f"Erro ao analisar {ativo} ({tf}):", e)
+                print(f"Erro com {ativo} ({tf}):", e)
 
-# Página principal
+# Rota principal
 @app.route('/')
 def index():
-    return "✅ Bot com alertas inteligentes iniciado com sucesso!"
+    return "✅ Bot com alertas inteligentes iniciado"
 
 # Rota de teste de alerta
 @app.route('/test-alert')
-def test_alert():
-    mensagem = "🧪 Alerta de teste manual disparado com sucesso!"
+def testar_alerta():
+    mensagem = "🧪 Alerta de teste manual disparado via navegador!"
     enviar_alerta(mensagem)
-    return "✅ Alerta de teste enviado com sucesso para Discord e Telegram!"
+    return "✅ Alerta enviado com sucesso para Discord e Telegram!"
 
-# Função para agendar a execução contínua
+# Loop em segundo plano
 def iniciar_agendamento():
     schedule.every(15).minutes.do(monitorar)
     while True:
